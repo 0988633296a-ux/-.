@@ -3034,3 +3034,14 @@ main {
 .weather-spinning { animation:weather-spin 1s linear infinite; }
 @keyframes weather-spin { to { transform:rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) { .weather-spinning { animation:none; } }
+
+/* Staff sign-in remains reachable on small field devices. */
+.auth-entry { white-space: nowrap; min-height: 44px; }
+.login-form { max-width: 480px; }
+.login-form input { min-height: 52px; font-size: 17px; }
+.login-form > button { min-height: 52px; width: 100%; justify-content: center; }
+.password-field { position: relative; }
+.password-field input { padding-right: 58px; width: 100%; }
+.password-field button { position: absolute; right: 4px; top: 4px; min-width: 44px; min-height: 44px; }
+.auth-error { color: #b42318; background: #fff1f0; padding: 12px; border-radius: 10px; }
+@media (max-width: 480px) { .topbar { gap: 6px; } .top-right { gap: 7px; } .auth-entry { padding: 8px 10px; font-size: 14px; } .topbar .top-avatar { display: none; } }

@@ -6,6 +6,7 @@ import IncidentForm from "@/components/IncidentForm";
 import PhotoCard from "@/components/PhotoCard";
 import ResourceForm from "@/components/ResourceForm";
 import SettingsPanel from "@/components/SettingsPanel";
+import LoginForm from "@/components/LoginForm";
 import ActivateAccount from "@/components/ActivateAccount";
 import WeatherPanel from "@/components/WeatherPanel";
 import Statistics from "@/components/Statistics";
@@ -29,7 +30,7 @@ import {
   type Resource,
   type Store,
 } from "@/lib/model";
-import { putPhoto, saveStore, STORE_KEY } from "@/lib/persistence";
+import { client, putPhoto, saveStore, STORE_KEY } from "@/lib/persistence";
 import { printReport } from "@/lib/report";
 import {
   AlertTriangle,
@@ -72,7 +73,7 @@ import {
   X,
 } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 const MapView = dynamic(() => import("@/components/Map"), {
   ssr: false,
   loading: () => <div className="map loading">กำลังโหลดแผนที่…</div>,
@@ -139,6 +140,8 @@ function Empty({ text }: { text: string }) {
 }
 export default function App() {
   const [agency, setAgency] = useState(defaultAgency.name);
+  const authEpoch = useRef(0);
+  const [loginOpen, setLoginOpen] = useState(false);
   const [live, setLive] = useState(false);
   const [liveUser, setLiveUser] = useState("");
   const [pending, setPending] = useState(0);
@@ -216,10 +219,12 @@ export default function App() {
   const sync = useCallback(
     async (userId: string) => {
       if (!navigator.onLine) return;
+      const epoch = authEpoch.current;
       setSyncState("กำลังซิงก์");
       try {
-        await flushOperations(userId, setPending);
+        await flushOperations(userId, count => { if (epoch === authEpoch.current) setPending(count); });
         const loaded = await loadAgency();
+        if (epoch !== authEpoch.current) return;
         if (pendingCount(userId) === 0) {
           setStore(loaded.store);
           localStorage.setItem(
@@ -229,6 +234,7 @@ export default function App() {
           setSyncState("ซิงก์แล้ว");
         } else setSyncState("รอซิงก์");
       } catch (e) {
+        if (epoch !== authEpoch.current) return;
         setSyncState("รอตรวจสอบ");
         notify(
           "ข้อมูลยังอยู่ในเครื่อง: " +
@@ -238,14 +244,17 @@ export default function App() {
     },
     [notify],
   );
-  const enableLive = async () => {
+  const enableLive = useCallback(async () => {
+    const epoch = authEpoch.current;
     try {
       const loaded = await loadAgency();
+      if (epoch !== authEpoch.current) return false;
       setAgency(loaded.agency);
       setLiveUser(loaded.userId);
       setSessionUser(loaded.name);
       setRole(loaded.role);
       setLive(true);
+      localStorage.setItem("drc-mode", "live");
       const count = pendingCount(loaded.userId);
       setPending(count);
       const cached = localStorage.getItem("drc-live-" + loaded.userId);
@@ -254,10 +263,34 @@ export default function App() {
       setSyncState(count ? "รอซิงก์" : "ซิงก์แล้ว");
       notify("เปิดข้อมูลหน่วยงานจริงแล้ว");
       if (count) sync(loaded.userId);
+      return true;
     } catch (e) {
       notify(e instanceof Error ? e.message : "โหลดข้อมูลจริงไม่สำเร็จ");
+      return false;
     }
-  };
+  }, [notify, sync]);
+  useEffect(() => {
+    if (localStorage.getItem("drc-mode") !== "live" || window.location.hash || new URLSearchParams(window.location.search).has("auth")) return;
+    let active = true;
+    const c = client();
+    c?.auth.getSession().then(({ data }) => {
+      if (active && data.session && navigator.onLine) void enableLive();
+    });
+    return () => { active = false; };
+  }, [enableLive]);
+  useEffect(() => {
+    const subscription = client()?.auth.onAuthStateChange((event) => {
+      if (event !== "SIGNED_OUT") return;
+      authEpoch.current++;
+      localStorage.removeItem("drc-mode");
+      setLive(false); setLiveUser(""); setSessionUser(""); setPending(0);
+      setSelected(null); setCreate(false); setEditResource(null);
+      setAgency(defaultAgency.name); setRole("หัวหน้าศูนย์");
+      setStore(JSON.parse(localStorage.getItem(STORE_KEY) || "null") || seed());
+      notify("ออกจากระบบแล้ว ข้อมูลรอส่งยังเก็บในเครื่องของบัญชีเดิม");
+    });
+    return () => subscription?.data.subscription.unsubscribe();
+  }, [notify]);
   useEffect(() => {
     if (!live || !liveUser) return;
     const fn = () => sync(liveUser);
@@ -597,6 +630,13 @@ export default function App() {
   return (
     <div className="app">
       <ActivateAccount />
+      {loginOpen && <Dialog title="เข้าสู่ระบบเจ้าหน้าที่" subtitle={defaultAgency.name} onClose={() => setLoginOpen(false)}>
+        <LoginForm onSuccess={async () => {
+          const opened = await enableLive();
+          if (opened) { setLoginOpen(false); setPage("หน้าหลัก"); }
+          return opened;
+        }} />
+      </Dialog>}
       <aside className={`sidebar ${menu ? "shown" : ""}`}>
         <a
           className="brand"
@@ -713,6 +753,10 @@ export default function App() {
             </span>
           </div>
           <div className="top-right">
+            <button className="secondary auth-entry" onClick={() => {
+              if (live) { go("เพิ่มเติม"); setMoreTab("การตั้งค่า"); }
+              else setLoginOpen(true);
+            }}>{live ? "บัญชีผู้ใช้" : "เข้าสู่ระบบ"}</button>
             <span className={`connection ${online ? "" : "offline"}`}>
               {online ? <Wifi size={14} /> : <WifiOff size={14} />}{" "}
               {!online
@@ -1543,6 +1587,8 @@ export default function App() {
                       );
                       return;
                     }
+                    authEpoch.current++;
+                    localStorage.removeItem("drc-mode");
                     setLive(false);
                     setAgency(defaultAgency.name);
                     setLiveUser("");

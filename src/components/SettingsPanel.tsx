@@ -1,6 +1,7 @@
 "use client";
 import { type Store } from "@/lib/model";
 import { client } from "@/lib/persistence";
+import LoginForm from "./LoginForm";
 import { defaultConnection } from "@/lib/supabase-config";
 import { Database, Download, Lock, LogOut, Plus, Save } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -20,7 +21,7 @@ export default function SettingsPanel({
 }: {
   live: boolean;
   pending: number;
-  onLive: () => void;
+  onLive: () => Promise<boolean>;
   onSync: () => void;
   onDemo: () => void;
   onRecover: () => void;
@@ -32,20 +33,21 @@ export default function SettingsPanel({
   install: any;
 }) {
   const [config, setConfig] = useState(defaultConnection);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [signedIn, setSignedIn] = useState(false);
-  const [busy, setBusy] = useState(false);
   useEffect(() => {
     try {
-      const c = localStorage.getItem("drc-connection");
-      if (c) setConfig(JSON.parse(c));
-      client()
-        ?.auth.getSession()
+      const savedConfig = localStorage.getItem("drc-connection");
+      if (savedConfig) setConfig(JSON.parse(savedConfig));
+      const c = client();
+      c?.auth.getSession()
         .then(({ data }) => {
           setSignedIn(!!data.session);
           if (data.session) setUser(data.session.user.email || "");
         });
+      const subscription = c?.auth.onAuthStateChange((_event, session) => {
+        setSignedIn(!!session);
+      });
+      return () => subscription?.data.subscription.unsubscribe();
     } catch {}
   }, [setUser]);
   return (
@@ -128,7 +130,12 @@ export default function SettingsPanel({
                   notify("กรุณาซิงก์ข้อมูลรอส่งก่อนออกจากระบบ");
                   return;
                 }
-                await client()?.auth.signOut();
+                const result = await client()?.auth.signOut({ scope: "local" });
+                if (result?.error) {
+                  notify("ออกจากระบบไม่สำเร็จ กรุณาลองอีกครั้ง");
+                  return;
+                }
+                localStorage.removeItem("drc-mode");
                 setSignedIn(false);
                 setUser("");
                 notify("ออกจากระบบแล้ว");
@@ -140,58 +147,11 @@ export default function SettingsPanel({
             </button>
           </div>
         ) : (
-          <form
-            className="incident-form"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              const c = client();
-              if (!c) {
-                notify("ตั้งค่า Supabase ก่อนเข้าสู่ระบบ");
-                return;
-              }
-              setBusy(true);
-              try {
-                const { data, error } = await c.auth.signInWithPassword({
-                  email,
-                  password,
-                });
-                if (error) throw error;
-                setUser(data.user?.email || "");
-                setSignedIn(true);
-                setPassword("");
-                notify("เข้าสู่ระบบสำเร็จ ข้อมูลที่แสดงยังเป็นชุดตัวอย่าง");
-              } catch (e) {
-                notify(e instanceof Error ? e.message : "เข้าสู่ระบบไม่สำเร็จ");
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            <label>
-              อีเมล
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                autoComplete="username"
-              />
-            </label>
-            <label>
-              รหัสผ่าน
-              <input
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-              />
-            </label>
-            <button type="submit" className="primary" disabled={busy}>
-              <Lock size={17} />
-              {busy ? "กำลังเข้าสู่ระบบ…" : "เข้าสู่ระบบ"}
-            </button>
-          </form>
+          <LoginForm onSuccess={async () => {
+            const opened = await onLive();
+            setSignedIn(true);
+            return opened;
+          }} />
         )}
       </section>
       <div>

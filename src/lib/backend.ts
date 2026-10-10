@@ -51,7 +51,7 @@ export async function loadAgency(): Promise<{
     .single();
   if (pe || !profile)
     throw Error(
-      "ยังไม่มีสิทธิ์หน่วยงาน กรุณาให้ผู้ดูแลเพิ่มบัญชีในตาราง users",
+      "บัญชีนี้ยังไม่มีสิทธิ์หน่วยงาน กรุณาติดต่อผู้ดูแลศูนย์",
     );
   const { data: organization } = await c
     .from("organizations")

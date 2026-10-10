@@ -1,4 +1,4 @@
-const CACHE = "drc-shell-v3";
+const CACHE = "drc-shell-v4";
 self.addEventListener("install", (event) =>
   event.waitUntil(
     caches
