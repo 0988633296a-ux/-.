@@ -23,7 +23,13 @@ node tests/browser.mjs
 4. docs/04-wireframes.md
 5. docs/05-design-system.md
 
-## เปิดข้อมูลหน่วยงานจริง
+## สถานะการเชื่อมต่อ ปภ. ลำห้วยหลัว
+
+ตั้งค่า Supabase ของหน่วยงานแล้ว รายละเอียดการตั้งค่าและการเปิดใช้งานบัญชีอยู่ใน [docs/07-supabase-live.md](docs/07-supabase-live.md) ฐานข้อมูลธุรกิจเริ่มว่างสำหรับบันทึกข้อมูลจริง ข้อมูลตัวอย่างแยกจากข้อมูลหน่วยงาน
+
+เตรียม Edge Function สำหรับพยากรณ์กรมอุตุนิยมวิทยาและหน้าจอแสดงผลแล้ว แต่การเรียก API จาก Supabase ยังติด TLS handshake EOF จึงยังไม่มีข้อมูลพยากรณ์จริง ดู [docs/08-tmd-weather.md](docs/08-tmd-weather.md) Token เก็บฝั่งเซิร์ฟเวอร์และไม่รวมใน repository นี้
+
+## เปิดข้อมูลหน่วยงานจริงในโปรเจกต์ใหม่
 
 1. สร้าง Supabase project และรัน `supabase/schema.sql` ใน SQL Editor ของฐานข้อมูลใหม่ (migration นี้ออกแบบให้รันครั้งเดียว)
 2. สร้างบัญชีเจ้าหน้าที่ผ่าน Supabase Auth กำหนด redirect URL ให้ตรงกับ domain ที่ deploy
@@ -62,10 +68,10 @@ Phase 2: การจัดการ template Checklist ผ่าน UI, กา�
 
 Phase 3: เชื่อม API จริงกรมอุตุนิยมวิทยา Radar ThaiWater GISTDA Hotspot ระบบเตือนภัย และ LINE; เชื่อมระบบหน่วยงานและปรับ workflow ตาม SOP
 
-โมดูล API เหล่านี้ระบุ “รอเชื่อม API จริง” ไม่มีข้อมูล API ปลอม
+โมดูล API ที่ยังไม่เชื่อมต่อระบุ “รอเชื่อม API จริง” ไม่มีข้อมูล API ปลอม การพยากรณ์กรมอุตุนิยมวิทยายังมีข้อจำกัดตามสถานะด้านบน
 
 ## การตรวจสอบ
 
 - PostgreSQL-compatible PGlite: schema, RPC full lifecycle, guard Checklist/ทีม, idempotency, version conflicts, resource release, report snapshot, audit, role guard, soft delete
 - Playwright: desktop/mobile, GPS, full lifecycle, photos, PDF, reload persistence, navigation
-- ยังไม่มี Supabase ของหน่วยงานใน session: ยังไม่ได้ทดสอบ live Supabase Auth/Storage/network หรือ load/concurrency ในโครงสร้างหน่วยงานจริง ต้องทดสอบกับ staging project ก่อนใช้งานภาคสนามจริง
+- ตรวจวงจรการทำงานและสิทธิ์ในฐานข้อมูล Supabase จริงด้วยธุรกรรมที่ rollback แล้ว ยังต้องทดสอบการเข้าสู่ระบบ การอัปโหลดภาพ และการซิงก์บนอุปกรณ์เจ้าหน้าที่ รวมถึง load/concurrency ก่อนใช้งานภาคสนามเต็มรูปแบบ
