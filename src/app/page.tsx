@@ -10,6 +10,7 @@ import LoginForm from "@/components/LoginForm";
 import ActivateAccount from "@/components/ActivateAccount";
 import WeatherPanel from "@/components/WeatherPanel";
 import Statistics from "@/components/Statistics";
+import LineNotifications from "@/components/LineNotifications";
 import {
   flushOperations,
   loadAgency,
@@ -1469,13 +1470,7 @@ export default function App() {
                         </div>
                       </div>
                     ))}
-                  <div className="info-box">
-                    <Bell size={20} />
-                    <span>
-                      การแจ้งเตือน LINE และการส่งแจ้งเตือนเบื้องหลัง: รอเชื่อม
-                      API จริง
-                    </span>
-                  </div>
+                  <LineNotifications live={live} />
                 </section>
               )}
               {moreTab === "ประวัติการตรวจสอบ" && (
