@@ -69,6 +69,10 @@ export default function SettingsPanel({
           className="incident-form"
           onSubmit={(e) => {
             e.preventDefault();
+            if (live) {
+              notify("กรุณาซิงก์และออกจากข้อมูลหน่วยงานจริงก่อนเปลี่ยนการเชื่อมต่อ");
+              return;
+            }
             try {
               new URL(config.url);
               localStorage.setItem("drc-connection", JSON.stringify(config));

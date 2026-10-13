@@ -5,5 +5,5 @@ node_modules/
 .env*
 !.env.example
 
-out/
-.openai/
+# Also ignore dependency-directory symlinks in isolated worktrees.
+node_modules

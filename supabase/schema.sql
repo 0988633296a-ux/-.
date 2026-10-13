@@ -77,7 +77,16 @@ create index sync_actor on public.sync_operations(actor_id);
 create function private.my_org() returns uuid language sql stable security definer set search_path='' as $$select u.organization_id from public.users u join auth.users a on a.id=u.id where u.id=auth.uid() and u.deleted_at is null and a.email_confirmed_at is not null$$;
 create function private.my_role() returns public.app_role language sql stable security definer set search_path='' as $$select u.role from public.users u join auth.users a on a.id=u.id where u.id=auth.uid() and u.deleted_at is null and a.email_confirmed_at is not null$$;
 create function private.can_read_incident(p_id uuid) returns boolean language sql stable security definer set search_path='' as $$select exists(select 1 from public.incidents i where i.id=p_id and i.organization_id=private.my_org() and (private.my_role()<>'field_staff' or exists(select 1 from public.incident_staff a join public.staff s on s.id=a.staff_id where a.incident_id=i.id and s.user_id=auth.uid())))$$;
-create function private.can_work_incident(p_id uuid) returns boolean language sql stable security definer set search_path='' as $$select coalesce(private.can_read_incident(p_id) and private.my_role() in ('administrator','center_lead','dispatcher','field_staff'),false)$$;
+create function private.can_work_incident(p_id uuid) returns boolean language sql stable security definer set search_path='' as $$
+ select coalesce(
+  private.can_read_incident(p_id)
+  and private.my_role() in ('administrator','center_lead','dispatcher','field_staff')
+  and (private.my_role()<>'field_staff' or exists(
+   select 1 from public.incident_staff a join public.staff s on s.id=a.staff_id
+   where a.incident_id=p_id and a.organization_id=private.my_org()
+    and a.released_at is null and s.user_id=auth.uid() and s.deleted_at is null
+  )),false)
+$$;
 create function private.is_center_editor() returns boolean language sql stable security definer set search_path='' as $$select coalesce(private.my_role() in ('administrator','center_lead','dispatcher'),false)$$;
 -- RLS is enabled on EVERY public business table. No anonymous read policy.
 do $$declare t text;begin foreach t in array array['organizations','users','staff','skills','staff_skills','vehicles','equipment','locations','risk_locations','incidents','incident_timeline','incident_staff','incident_vehicles','incident_equipment','incident_photos','checklists','checklist_items','incident_checklist_items','reports','audit_logs','notification_outbox','sync_operations','external_integrations'] loop execute format('alter table public.%I enable row level security',t);end loop;end$$;

@@ -1,6 +1,7 @@
 import type { Incident, Photo, Resource, Store } from "./model";
 import { uid } from "./model";
 import { client, getPhoto } from "./persistence";
+import { scopedQueueKey, connectionScope } from "./connection-scope";
 export type Operation = {
   id: string;
   kind: string;
@@ -12,7 +13,7 @@ export type Operation = {
   expectedVersion?: number;
   resourceKind?: string;
 };
-export const queueKey = (user: string) => `drc-outbox-${user}`;
+export const queueKey = scopedQueueKey;
 export function queueOperation(op: Omit<Operation, "id" | "at">) {
   const key = queueKey(op.userId);
   const q: Operation[] = JSON.parse(localStorage.getItem(key) || "[]");
@@ -27,17 +28,13 @@ const api = () => {
   if (!c) throw Error("ยังไม่ได้เชื่อม Supabase");
   return c;
 };
-async function rpc(name: string, args: any) {
-  const { data, error } = await api().rpc(name, args);
-  if (error) throw Error(error.message);
-  return data;
-}
 export async function loadAgency(): Promise<{
   store: Store;
   userId: string;
   name: string;
   role: string;
   agency: string;
+  organizationId: string;
 }> {
   const c = api();
   const {
@@ -244,6 +241,7 @@ export async function loadAgency(): Promise<{
     userId: user.id,
     name: profile.name,
     agency: organization?.name || "ศูนย์ปฏิบัติการ",
+    organizationId: profile.organization_id,
     role: (
       {
         administrator: "Administrator",
@@ -255,8 +253,7 @@ export async function loadAgency(): Promise<{
     )[profile.role],
   };
 }
-async function uploadPhotos(op: Operation, photos: Photo[]) {
-  const c = api();
+async function uploadPhotos(op: Operation, photos: Photo[], c = api()) {
   const { data: profile, error } = await c
     .from("users")
     .select("organization_id")
@@ -290,14 +287,23 @@ async function uploadPhotos(op: Operation, photos: Photo[]) {
   return rows;
 }
 async function flushQueue(userId: string, onProgress: (count: number) => void) {
+  const origin = connectionScope();
   const c = api();
+  const rpc = async (name: string, args: any) => {
+    if (connectionScope() !== origin) throw Error("การเชื่อมต่อเปลี่ยนแล้ว คำสั่งเดิมยังอยู่ในเครื่อง");
+    const { data, error } = await c.rpc(name, args);
+    if (error) throw Error(error.message);
+    return data;
+  };
   const {
     data: { user },
   } = await c.auth.getUser();
   if (user?.id !== userId)
     throw Error("บัญชีที่เข้าสู่ระบบไม่ตรงกับเจ้าของข้อมูลรอส่ง");
+  if (connectionScope() !== origin) throw Error("การเชื่อมต่อเปลี่ยนแล้ว คำสั่งเดิมยังอยู่ในเครื่อง");
   const key = queueKey(userId);
   while (navigator.onLine) {
+    if (connectionScope() !== origin) throw Error("การเชื่อมต่อเปลี่ยนแล้ว คำสั่งเดิมยังอยู่ในเครื่อง");
     const q: Operation[] = JSON.parse(localStorage.getItem(key) || "[]");
     if (!q.length) return;
     const op = q[0];
@@ -307,7 +313,7 @@ async function flushQueue(userId: string, onProgress: (count: number) => void) {
     if (kind === "รับแจ้งเหตุ") {
       await rpc("create_incident", { p_operation: op.id, p_data: after });
       if (after.photos?.length) {
-        const rows = await uploadPhotos(op, after.photos);
+        const rows = await uploadPhotos(op, after.photos, c);
         await rpc("attach_incident_photos", {
           p_operation: op.id,
           p_incident: after.id,
@@ -378,6 +384,7 @@ async function flushQueue(userId: string, onProgress: (count: number) => void) {
         after.photos.filter(
           (p: Photo) => !before.photos.some((p0: Photo) => p0.id === p.id),
         ),
+        c,
       );
       await rpc("attach_incident_photos", {
         p_operation: op.id,
@@ -406,6 +413,7 @@ async function flushQueue(userId: string, onProgress: (count: number) => void) {
         p_data: after,
       });
     } else throw Error("คำสั่งนี้ยังไม่รองรับในระบบจริง");
+    if (connectionScope() !== origin) throw Error("การเชื่อมต่อเปลี่ยนแล้ว คำสั่งเดิมยังอยู่ในเครื่อง");
     const remaining: Operation[] = JSON.parse(
       localStorage.getItem(key) || "[]",
     );

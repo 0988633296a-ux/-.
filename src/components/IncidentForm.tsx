@@ -1,6 +1,15 @@
 "use client";
 import { levels, types, uid, type Incident, type Photo } from "@/lib/model";
-import { putPhoto } from "@/lib/persistence";
+import { getPhoto, putPhoto } from "@/lib/persistence";
+import {
+  INCIDENT_PHOTO_ACCEPT,
+  incidentDraftKey,
+  persistDraftPhotos,
+  readIncidentDraft,
+  validateIncidentPhoto,
+  writeIncidentDraft,
+  type DraftPhoto,
+} from "@/lib/incident-drafts";
 import {
   AlertTriangle,
   Camera,
@@ -10,17 +19,21 @@ import {
   Plus,
   Save,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Dialog from "./Dialog";
 export default function IncidentForm({
   onClose,
   onSave,
   actor,
   notify,
+  draftScope,
+  live = false,
 }: {
   onClose: () => void;
   onSave: (i: Incident) => boolean;
   actor: string;
+  draftScope?: string;
+  live?: boolean;
   notify: (s: string) => void;
 }) {
   const [draft, setDraft] = useState<{
@@ -61,21 +74,151 @@ export default function IncidentForm({
     area: "",
   });
   const [gpsBusy, setGpsBusy] = useState(false);
-  const [files, setFiles] = useState<File[]>([]);
+  const [photos, setPhotos] = useState<DraftPhoto[]>([]);
+  const photosRef = useRef<DraftPhoto[]>([]);
+  const draftRef = useRef(draft);
+  const initialDraft = useRef(draft);
+  const pendingRef = useRef(false);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [failedFiles, setFailedFiles] = useState<File[]>([]);
+  const [storageError, setStorageError] = useState("");
+  const [recoveredAt, setRecoveredAt] = useState("");
+  const [previews, setPreviews] = useState<
+    { id: string; url: string; name: string }[]
+  >([]);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const generationRef = useRef(0);
+  const draftKey = incidentDraftKey(draftScope, live);
   useEffect(() => {
+    generationRef.current += 1;
+    pendingRef.current = false;
+    busyRef.current = false;
+    setGpsBusy(false);
+    setPhotoBusy(false);
+    setBusy(false);
+    draftRef.current = initialDraft.current;
+    photosRef.current = [];
+    setDraft(initialDraft.current);
+    setPhotos([]);
+    setRecoveredAt("");
+    setStorageError("");
+    setFailedFiles([]);
     try {
-      const d = localStorage.getItem("drc-incident-draft");
-      if (d) setDraft(JSON.parse(d));
-    } catch {}
-  }, []);
-  const field = (key: keyof typeof draft, value: any) => {
-    const next = { ...draft, [key]: value };
-    setDraft(next);
-    try {
-      localStorage.setItem("drc-incident-draft", JSON.stringify(next));
+      const saved = readIncidentDraft<typeof draft>(localStorage, draftKey);
+      if (saved) {
+        const next = { ...initialDraft.current, ...saved.draft };
+        draftRef.current = next;
+        setDraft(next);
+        photosRef.current = saved.photos;
+        setPhotos(saved.photos);
+        setRecoveredAt(saved.savedAt);
+      }
     } catch {
-      notify("พื้นที่จัดเก็บร่างไม่เพียงพอ");
+      setStorageError("อ่านร่างที่บันทึกไว้ไม่สำเร็จ ร่างเดิมยังอยู่ในเครื่อง");
+    }
+    return () => {
+      generationRef.current += 1;
+    };
+  }, [draftKey]);
+  useEffect(() => {
+    let disposed = false;
+    const urls: string[] = [];
+    void Promise.all(
+      photos.map(async (photo) => {
+        const blob = await getPhoto(photo.id);
+        if (!blob)
+          throw Error("ไม่พบภาพในร่าง กรุณาตรวจสอบพื้นที่จัดเก็บในเครื่อง");
+        const url = URL.createObjectURL(blob);
+        urls.push(url);
+        return { id: photo.id, url, name: photo.name };
+      }),
+    )
+      .then((next) => {
+        if (!disposed) setPreviews(next);
+        else urls.forEach((url) => URL.revokeObjectURL(url));
+      })
+      .catch((err) => {
+        if (!disposed)
+          setStorageError(
+            err instanceof Error ? err.message : "อ่านภาพในร่างไม่สำเร็จ",
+          );
+      });
+    return () => {
+      disposed = true;
+      urls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [photos]);
+  useEffect(() => {
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      if (pendingRef.current || failedFiles.length > 0 || storageError) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [failedFiles.length, storageError]);
+  const persist = (next = draftRef.current, nextPhotos = photosRef.current) => {
+    try {
+      writeIncidentDraft(localStorage, draftKey, next, nextPhotos);
+      setStorageError("");
+      return true;
+    } catch {
+      setStorageError("เก็บร่างไม่สำเร็จ กรุณาลองอีกครั้งก่อนปิด");
+      notify("พื้นที่จัดเก็บร่างไม่เพียงพอ ร่างยังอยู่ในหน้าต่างนี้");
+      return false;
+    }
+  };
+  const field = (key: keyof typeof draft, value: any) => {
+    const next = { ...draftRef.current, [key]: value };
+    draftRef.current = next;
+    setDraft(next);
+    persist(next);
+  };
+  const selectPhotos = async (files: File[]) => {
+    if (pendingRef.current || busyRef.current) return;
+    const invalid = files.map(validateIncidentPhoto).find(Boolean);
+    if (invalid) {
+      notify(invalid);
+      return;
+    }
+    const generation = generationRef.current;
+    pendingRef.current = true;
+    setPhotoBusy(true);
+    setFailedFiles(files);
+    try {
+      const saved = await persistDraftPhotos(files, putPhoto, uid);
+      if (generation !== generationRef.current) return;
+      const next = [...photosRef.current, ...saved];
+      photosRef.current = next;
+      setPhotos(next);
+      setFailedFiles([]);
+      persist(draftRef.current, next);
+    } catch (err) {
+      if (generation !== generationRef.current) return;
+      const message = err instanceof Error ? err.message : "เก็บภาพไม่สำเร็จ";
+      setStorageError(`${message} กรุณาลองเก็บภาพอีกครั้งก่อนปิด`);
+      notify(message);
+    } finally {
+      if (generation === generationRef.current) {
+        pendingRef.current = false;
+        setPhotoBusy(false);
+      }
+    }
+  };
+  const close = () => {
+    if (pendingRef.current || busyRef.current) {
+      notify("กรุณารอให้บันทึกเสร็จก่อนปิด");
+      return;
+    }
+    if (failedFiles.length) {
+      notify("กรุณาลองเก็บภาพอีกครั้งก่อนปิด");
+      return;
+    }
+    if (persist()) {
+      generationRef.current += 1;
+      onClose();
     }
   };
   const locate = () => {
@@ -83,20 +226,24 @@ export default function IncidentForm({
       notify("อุปกรณ์ไม่รองรับตำแหน่ง GPS");
       return;
     }
+    const generation = generationRef.current;
     setGpsBusy(true);
     navigator.geolocation.getCurrentPosition(
       (p) => {
+        if (generation !== generationRef.current) return;
         const next = {
-          ...draft,
+          ...draftRef.current,
           lat: p.coords.latitude,
           lng: p.coords.longitude,
         };
+        draftRef.current = next;
         setDraft(next);
-        localStorage.setItem("drc-incident-draft", JSON.stringify(next));
+        persist(next);
         setGpsBusy(false);
         notify("บันทึกตำแหน่งปัจจุบันแล้ว");
       },
       () => {
+        if (generation !== generationRef.current) return;
         setGpsBusy(false);
         notify("อ่าน GPS ไม่สำเร็จ กรุณาอนุญาตตำแหน่งหรือกรอกพิกัดเอง");
       },
@@ -106,18 +253,47 @@ export default function IncidentForm({
   return (
     <Dialog
       title="รับแจ้งเหตุสาธารณภัย"
-      subtitle="สร้างเหตุใหม่ · ข้อมูลตัวอย่าง"
-      onClose={onClose}
+      subtitle={live ? "สร้างเหตุใหม่" : "สร้างเหตุใหม่ · ข้อมูลตัวอย่าง"}
+      onClose={close}
     >
       <div className="draft-note">
         <Save size={16} />
         ร่างข้อความบันทึกอัตโนมัติในเครื่อง
       </div>
+      {recoveredAt && (
+        <div className="draft-note">
+          กู้คืนร่างที่บันทึกไว้ ·{" "}
+          {new Date(recoveredAt).toLocaleString("th-TH")}
+          <button
+            className="text-button"
+            type="button"
+            onClick={() =>
+              field(
+                "reportedAt",
+                new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
+                  .toISOString()
+                  .slice(0, 16),
+              )
+            }
+          >
+            ใช้เวลาปัจจุบัน
+          </button>
+        </div>
+      )}
+      {storageError && (
+        <div className="draft-note" role="alert">
+          {storageError}
+        </div>
+      )}
       <form
         className="incident-form"
         onSubmit={async (e) => {
           e.preventDefault();
-          if (busy) return;
+          if (busyRef.current || pendingRef.current) return;
+          if (failedFiles.length) {
+            notify("กรุณาลองเก็บภาพอีกครั้งก่อนบันทึกเหตุ");
+            return;
+          }
           const lat = Number(draft.lat),
             lng = Number(draft.lng);
           if (
@@ -131,24 +307,28 @@ export default function IncidentForm({
             notify("กรุณาระบุพิกัด GPS ที่ถูกต้อง");
             return;
           }
+          const generation = generationRef.current;
+          busyRef.current = true;
           setBusy(true);
           try {
             const id = uid();
-            const photos: Photo[] = [];
-            for (const file of files) {
-              if (file.size > 15 * 1024 * 1024)
-                throw Error("ภาพต้องมีขนาดไม่เกิน 15 MB");
-              const photoId = uid();
-              await putPhoto(photoId, file);
-              photos.push({
-                id: photoId,
+            const incidentPhotos: Photo[] = [];
+            for (const photo of photosRef.current) {
+              const blob = await getPhoto(photo.id);
+              if (generation !== generationRef.current) return;
+              if (!blob)
+                throw Error(
+                  "ไม่พบภาพในร่าง ยังไม่บันทึกเหตุ กรุณาตรวจสอบพื้นที่จัดเก็บ",
+                );
+              incidentPhotos.push({
+                id: photo.id,
                 phase: "ก่อนดำเนินการ",
                 url: "",
-                at: new Date().toISOString(),
+                at: photo.at,
                 actor,
                 lat,
                 lng,
-                description: file.name,
+                description: photo.name,
               });
             }
             const i: Incident = {
@@ -185,23 +365,30 @@ export default function IncidentForm({
                   to: "รับแจ้ง",
                 },
               ],
-              photos,
+              photos: incidentPhotos,
               result: "",
               damage: "",
               problems: "",
               commander: "",
               version: 1,
-              demo: true,
+              demo: !live,
             };
-            if (onSave(i)) localStorage.removeItem("drc-incident-draft");
+            if (onSave(i)) {
+              generationRef.current += 1;
+              if (draftKey) localStorage.removeItem(draftKey);
+            }
           } catch (err) {
+            if (generation !== generationRef.current) return;
             notify(
               err instanceof Error
                 ? err.message
                 : "บันทึกไม่สำเร็จ ร่างยังอยู่ในเครื่อง",
             );
           } finally {
-            setBusy(false);
+            if (generation === generationRef.current) {
+              busyRef.current = false;
+              setBusy(false);
+            }
           }
         }}
       >
@@ -406,23 +593,61 @@ export default function IncidentForm({
           <span>
             แนบภาพจุดเกิดเหตุ{" "}
             <small>
-              {files.length
-                ? `${files.length} ภาพที่เลือก`
+              {photos.length
+                ? `${photos.length} ภาพที่เก็บในร่าง`
                 : "ถ่ายภาพหรืออัปโหลดจากมือถือ"}
             </small>
           </span>
           <input
             type="file"
             multiple
-            accept="image/*"
-            onChange={(e) => setFiles(Array.from(e.target.files || []))}
+            accept={INCIDENT_PHOTO_ACCEPT}
+            disabled={photoBusy || busy || failedFiles.length > 0}
+            onChange={(e) => {
+              const files = Array.from(e.target.files || []);
+              e.target.value = "";
+              void selectPhotos(files);
+            }}
           />
         </label>
+        {photoBusy && <p role="status">กำลังเก็บภาพในร่าง…</p>}
+        {failedFiles.length > 0 && !photoBusy && (
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => void selectPhotos(failedFiles)}
+          >
+            ลองเก็บภาพอีกครั้ง ({failedFiles.length} ภาพ)
+          </button>
+        )}
+        {previews.length > 0 && (
+          <div className="gps-line">
+            {previews.map((photo) => (
+              <img
+                key={photo.id}
+                src={photo.url}
+                alt={photo.name}
+                width={72}
+                height={72}
+                style={{ objectFit: "cover" }}
+              />
+            ))}
+          </div>
+        )}
         <div className="form-footer">
-          <button type="button" className="secondary" onClick={onClose}>
+          <button
+            type="button"
+            className="secondary"
+            onClick={close}
+            disabled={photoBusy || busy}
+          >
             เก็บร่าง / ปิด
           </button>
-          <button className="primary" type="submit" disabled={busy}>
+          <button
+            className="primary"
+            type="submit"
+            disabled={busy || photoBusy || failedFiles.length > 0}
+          >
             <Plus size={19} />
             {busy ? "กำลังบันทึก…" : "บันทึกรับแจ้งเหตุ"}
           </button>

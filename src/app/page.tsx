@@ -11,11 +11,14 @@ import ActivateAccount from "@/components/ActivateAccount";
 import WeatherPanel from "@/components/WeatherPanel";
 import Statistics from "@/components/Statistics";
 import LineNotifications from "@/components/LineNotifications";
+import { validateIncidentPhoto, INCIDENT_PHOTO_ACCEPT } from "@/lib/incident-drafts";
+import { connectionScope, liveCacheKey, liveProfileKey, legacyQueueCount } from "@/lib/connection-scope";
 import {
   flushOperations,
   loadAgency,
   pendingCount,
   queueOperation,
+  queueKey,
 } from "@/lib/backend";
 import {
   active,
@@ -79,6 +82,12 @@ const MapView = dynamic(() => import("@/components/Map"), {
   ssr: false,
   loading: () => <div className="map loading">กำลังโหลดแผนที่…</div>,
 });
+const rememberAccount = (loaded: { userId: string; name: string; role: string; agency: string; organizationId: string }) => {
+  localStorage.setItem(liveProfileKey(loaded.userId), JSON.stringify({
+    userId: loaded.userId, name: loaded.name, role: loaded.role, agency: loaded.agency,
+    organizationId: loaded.organizationId, connection: connectionScope(),
+  }));
+};
 const checklistLabels = (i: Incident): string[] =>
   i.checkItems?.length
     ? i.checkItems.map((c) => c.label)
@@ -145,9 +154,17 @@ export default function App() {
   const [loginOpen, setLoginOpen] = useState(false);
   const [live, setLive] = useState(false);
   const [liveUser, setLiveUser] = useState("");
+  const [liveOrganization, setLiveOrganization] = useState("");
+  const [liveConnection, setLiveConnection] = useState("");
+  const [legacyPending, setLegacyPending] = useState(0);
   const [pending, setPending] = useState(0);
   const [syncState, setSyncState] = useState("");
   const [store, setStore] = useState<Store | null>(null);
+  const storeRef = useRef<Store | null>(null);
+  storeRef.current = store;
+  const liveUserRef = useRef(liveUser);
+  liveUserRef.current = liveUser;
+  const updateLatest = useRef<(i: Incident, action: string) => void>(() => {});
   const [page, setPage] = useState("หน้าหลัก");
   const [selected, setSelected] = useState<string | null>(null);
   const [create, setCreate] = useState(false);
@@ -204,14 +221,14 @@ export default function App() {
     if (!store) return;
     try {
       if (live)
-        localStorage.setItem("drc-live-" + liveUser, JSON.stringify(store));
+        { if (liveConnection !== connectionScope()) return; localStorage.setItem(liveCacheKey(liveUser), JSON.stringify(store)); }
       else saveStore(store);
     } catch {
       notify(
         "บันทึกไม่สำเร็จ: พื้นที่จัดเก็บเต็ม กรุณาส่งออกข้อมูลก่อนปิดหน้า",
       );
     }
-  }, [store, notify, live, liveUser]);
+  }, [store, notify, live, liveUser, liveConnection]);
   const open = useCallback((id: string) => {
     setSelected(id);
     setDetailTab("ข้อมูลเหตุ");
@@ -221,15 +238,20 @@ export default function App() {
     async (userId: string) => {
       if (!navigator.onLine) return;
       const epoch = authEpoch.current;
+      const origin = connectionScope();
       setSyncState("กำลังซิงก์");
       try {
         await flushOperations(userId, count => { if (epoch === authEpoch.current) setPending(count); });
         const loaded = await loadAgency();
-        if (epoch !== authEpoch.current) return;
+        if (epoch !== authEpoch.current || origin !== connectionScope() || loaded.userId !== userId) return;
+        rememberAccount(loaded);
+        setAgency(loaded.agency); setSessionUser(loaded.name); setRole(loaded.role);
+        setLiveOrganization(loaded.organizationId);
+        setLiveConnection(origin);
         if (pendingCount(userId) === 0) {
           setStore(loaded.store);
           localStorage.setItem(
-            "drc-live-" + userId,
+            liveCacheKey(userId),
             JSON.stringify(loaded.store),
           );
           setSyncState("ซิงก์แล้ว");
@@ -247,18 +269,23 @@ export default function App() {
   );
   const enableLive = useCallback(async () => {
     const epoch = authEpoch.current;
+    const origin = connectionScope();
     try {
       const loaded = await loadAgency();
-      if (epoch !== authEpoch.current) return false;
+      if (epoch !== authEpoch.current || origin !== connectionScope()) return false;
       setAgency(loaded.agency);
       setLiveUser(loaded.userId);
+      setLiveOrganization(loaded.organizationId);
+      setLiveConnection(origin);
+      setLegacyPending(legacyQueueCount(loaded.userId));
       setSessionUser(loaded.name);
       setRole(loaded.role);
       setLive(true);
       localStorage.setItem("drc-mode", "live");
+      rememberAccount(loaded);
       const count = pendingCount(loaded.userId);
       setPending(count);
-      const cached = localStorage.getItem("drc-live-" + loaded.userId);
+      const cached = localStorage.getItem(liveCacheKey(loaded.userId));
       setStore(count && cached ? JSON.parse(cached) : loaded.store);
       setSelected(null);
       setSyncState(count ? "รอซิงก์" : "ซิงก์แล้ว");
@@ -274,17 +301,44 @@ export default function App() {
     if (localStorage.getItem("drc-mode") !== "live" || window.location.hash || new URLSearchParams(window.location.search).has("auth")) return;
     let active = true;
     const c = client();
-    c?.auth.getSession().then(({ data }) => {
-      if (active && data.session && navigator.onLine) void enableLive();
-    });
-    return () => { active = false; };
+    const restore = async () => {
+      const origin = connectionScope();
+      const { data } = await c!.auth.getSession();
+      if (!active || !data.session || origin !== connectionScope()) return;
+      if (navigator.onLine) { void enableLive(); return; }
+      if (!data.session.expires_at || data.session.expires_at * 1000 <= Date.now()) {
+        notify("เซสชันหมดอายุ กรุณาเชื่อมอินเทอร์เน็ตเพื่อเข้าสู่ระบบอีกครั้ง"); return;
+      }
+      try {
+        const id = data.session.user.id;
+        const raw = localStorage.getItem(liveCacheKey(id));
+        if (!raw) { notify("ยังไม่มีข้อมูลหน่วยงานในเครื่อง กรุณาเปิดระบบขณะออนไลน์ก่อน"); return; }
+        const profile = JSON.parse(localStorage.getItem(liveProfileKey(id)) || "null");
+        if (profile && (profile.connection !== connectionScope() || profile.userId !== id)) {
+          notify("ข้อมูลในเครื่องเป็นของการเชื่อมต่ออื่น กรุณาออนไลน์เพื่อตรวจสอบบัญชี"); return;
+        }
+        setLiveUser(id); setLiveOrganization(profile?.organizationId || "");
+        setLiveConnection(connectionScope());
+        setLegacyPending(legacyQueueCount(id));
+        setAgency(profile?.agency || defaultAgency.name);
+        setSessionUser(profile?.name || data.session.user.email || "เจ้าหน้าที่");
+        setRole(profile?.role || "ผู้ดูรายงาน");
+        setStore(JSON.parse(raw)); setLive(true); setSelected(null);
+        setPending(pendingCount(id)); setSyncState("ออฟไลน์ — ใช้ข้อมูลที่เก็บในเครื่อง");
+        notify(profile ? "เปิดข้อมูลหน่วยงานที่เก็บในเครื่องแล้ว" : "เปิดข้อมูลเดิมแบบอ่านอย่างเดียว กรุณาออนไลน์เพื่อยืนยันสิทธิ์");
+      } catch { notify("อ่านข้อมูลออฟไลน์ไม่สำเร็จ ข้อมูลเดิมยังเก็บอยู่ในเครื่อง"); }
+    };
+    if (c) void restore().catch(() => { if(active) notify("ตรวจเซสชันไม่สำเร็จ กรุณาออนไลน์เพื่อยืนยันบัญชี"); });
+    const reconnect = () => { if(active && localStorage.getItem("drc-mode") === "live") void enableLive(); };
+    window.addEventListener("online", reconnect);
+    return () => { active = false; window.removeEventListener("online", reconnect); };
   }, [enableLive]);
   useEffect(() => {
     const subscription = client()?.auth.onAuthStateChange((event) => {
       if (event !== "SIGNED_OUT") return;
       authEpoch.current++;
       localStorage.removeItem("drc-mode");
-      setLive(false); setLiveUser(""); setSessionUser(""); setPending(0);
+      setLive(false); setLiveUser(""); setLiveOrganization(""); setSessionUser(""); setPending(0);
       setSelected(null); setCreate(false); setEditResource(null);
       setAgency(defaultAgency.name); setRole("หัวหน้าศูนย์");
       setStore(JSON.parse(localStorage.getItem(STORE_KEY) || "null") || seed());
@@ -305,6 +359,9 @@ export default function App() {
     after: unknown,
     incidentId?: string,
   ) => {
+    if (live && liveConnection !== connectionScope()) {
+      notify("การเชื่อมต่อเปลี่ยนแล้ว กรุณาเปิดบัญชีหน่วยงานใหม่ก่อนบันทึก"); return false;
+    }
     if (live && role === "ผู้ดูรายงาน") {
       notify("บทบาทนี้มีสิทธิ์ดูรายงานเท่านั้น");
       return false;
@@ -345,7 +402,7 @@ export default function App() {
             : editResource?.kind === "ยานพาหนะ"
               ? "vehicles"
               : "equipment";
-        localStorage.setItem("drc-live-" + liveUser, JSON.stringify(next));
+        localStorage.setItem(liveCacheKey(liveUser), JSON.stringify(next));
         queueOperation({
           userId: liveUser,
           kind: action,
@@ -382,6 +439,8 @@ export default function App() {
       i.id,
     );
   };
+  updateLatest.current = update;
+  const formEpoch = authEpoch.current;
   if (!store)
     return (
       <div className="boot">
@@ -784,6 +843,15 @@ export default function App() {
           </div>
         </header>
         <main>
+          {live && legacyPending > 0 && <div className="info-box" role="alert">
+            <AlertTriangle size={20}/><div>พบคำสั่งรอส่งจากรุ่นเดิม {legacyPending} รายการ ข้อมูลยังอยู่ในเครื่อง ต้องตรวจสอบบัญชีและหน่วยงานก่อนนำเข้าระบบ
+            <button className="secondary" onClick={() => {
+              const backup = { operations: JSON.parse(localStorage.getItem("drc-outbox-" + liveUser) || "[]"), cache: JSON.parse(localStorage.getItem("drc-live-" + liveUser) || "null") };
+              const url = URL.createObjectURL(new Blob([JSON.stringify(backup)], {type:"application/json"}));
+              const link = document.createElement("a"); link.href=url; link.download="drc-legacy-backup.json"; link.click();
+              setTimeout(()=>URL.revokeObjectURL(url),1000);
+            }}>สำรองคำสั่งรุ่นเดิม</button></div>
+          </div>}
           <div className="page-heading">
             <div>
               <div className="eyebrow">
@@ -1550,7 +1618,7 @@ export default function App() {
                       )
                     )
                       return;
-                    const key = "drc-outbox-" + liveUser;
+                    const key = queueKey(liveUser);
                     const raw = localStorage.getItem(key) || "[]";
                     const u = URL.createObjectURL(
                       new Blob([raw], { type: "application/json" }),
@@ -1679,9 +1747,15 @@ export default function App() {
       )}
       {create && (
         <IncidentForm
+          key={live ? `${liveConnection}/${liveOrganization}/${liveUser}` : "demo"}
+          draftScope={live ? `${liveConnection}/${liveOrganization}/${liveUser}` : "demo"}
+          live={live}
           onClose={() => setCreate(false)}
           notify={notify}
           onSave={(i) => {
+            if (formEpoch !== authEpoch.current || liveUser !== liveUserRef.current) {
+              notify("บัญชีเปลี่ยนแล้ว ร่างเดิมยังอยู่ในเครื่อง กรุณาเปิดแบบฟอร์มใหม่"); return false;
+            }
             i.demo = !live;
             const saved = mutate(
               { ...store, incidents: [i, ...store.incidents] },
@@ -2070,15 +2144,22 @@ export default function App() {
                     <small>เก็บวันเวลา ผู้บันทึก พิกัด และคำอธิบาย</small>
                     <input
                       type="file"
-                      accept="image/*"
+                      accept={INCIDENT_PHOTO_ACCEPT}
                       multiple
                       onChange={async (e) => {
                         const files = Array.from(e.target.files || []);
+                        const epoch = authEpoch.current;
+                        const owner = liveUser;
+                        const incidentId = current.id;
+                        const capturePhase = photoPhase;
+                        const origin = liveConnection;
+                        const input = e.currentTarget;
                         try {
                           const photos: Photo[] = [];
                           for (const file of files) {
-                            if (file.size > 15 * 1024 * 1024) {
-                              notify("ภาพต้องมีขนาดไม่เกิน 15 MB");
+                            const invalid = validateIncidentPhoto(file);
+                            if (invalid) {
+                              notify(invalid);
                               continue;
                             }
                             const id = uid();
@@ -2099,7 +2180,7 @@ export default function App() {
                             }
                             photos.push({
                               id,
-                              phase: photoPhase,
+                              phase: capturePhase,
                               url: "",
                               at: new Date().toISOString(),
                               actor,
@@ -2107,18 +2188,16 @@ export default function App() {
                               description: file.name,
                             });
                           }
-                          update(
-                            {
-                              ...current,
-                              photos: [...current.photos, ...photos],
-                            },
-                            "เพิ่มภาพหน้างาน",
-                          );
+                          if (epoch !== authEpoch.current || owner !== liveUserRef.current || (owner && origin !== connectionScope())) return;
+                          const latest = storeRef.current?.incidents.find(i => i.id === incidentId);
+                          if (!latest || !active(latest)) { notify("เหตุนี้ปิดแล้ว ภาพยังเก็บในอุปกรณ์ กรุณาตรวจสอบกับศูนย์"); return; }
+                          if (!photos.length) return;
+                          updateLatest.current({ ...latest, photos: [...latest.photos, ...photos] }, "เพิ่มภาพหน้างาน");
                           notify(`บันทึกภาพ ${photos.length} ภาพแล้ว`);
                         } catch {
                           notify("บันทึกภาพไม่สำเร็จ กรุณาตรวจพื้นที่จัดเก็บ");
                         }
-                        e.target.value = "";
+                        input.value = "";
                       }}
                     />
                   </label>
